@@ -6,6 +6,7 @@ const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1wnisJN1C7DpdBEgzp
 const SCP_SIGNS_CSV_URL = "https://docs.google.com/spreadsheets/d/1wnisJN1C7DpdBEgzpXHIyBismjKNsm4ZU7_VAErdeIk/gviz/tq?tqx=out:csv&sheet=SCP-signs";
 const SIZE_REFERENCE_CSV_URL = "https://docs.google.com/spreadsheets/d/1wnisJN1C7DpdBEgzpXHIyBismjKNsm4ZU7_VAErdeIk/gviz/tq?tqx=out:csv&sheet=size-reference";
 const IMAGE_DIRECTORY = "./images/";
+const IMAGE_EXTENSIONS = [".webp", ".png", ".jpg", ".jpeg"];
 
 const state = {
   categories: [],
@@ -13,7 +14,6 @@ const state = {
   latestImages: [],
   visibleImages: [],
   favorites: readStoredSet(STORAGE_KEYS.favorites),
-  favoritesOnly: false,
   activeCategory: null,
   lightboxIndex: -1,
   highlightSlides: [],
@@ -177,6 +177,14 @@ function sheetGallery(csv, sizeReference = new Map(), isScpSigns = false) {
   return { categories, images };
 }
 
+function namespaceGallery(data, prefix) {
+  const categoryIds = new Map(data.categories.map((category) => [category.id, `${prefix}-${category.id}`]));
+  return {
+    categories: data.categories.map((category) => ({ ...category, id: categoryIds.get(category.id) })),
+    images: data.images.map((image) => ({ ...image, category: categoryIds.get(image.category) }))
+  };
+}
+
 function parseSizeReference(csv) {
   const [headers, ...rows] = parseCsv(csv);
   if (!headers) throw new Error("The size-reference spreadsheet is empty.");
@@ -220,6 +228,7 @@ function renderCategories() {
     const count = categoryImages.length;
     if (categoryImages[0]) setImageSource(image, categoryImages[0]);
     const imageCount = makeElement("span", "collection-count", `${count} ${count === 1 ? "IMAGE" : "IMAGES"}`);
+    imageCount.setAttribute("aria-label", `${count} ${count === 1 ? "image" : "images"}`);
     info.append(title, imageCount);
     const arrow = makeElement("span", "collection-arrow", "↗");
     arrow.setAttribute("aria-hidden", "true");
@@ -238,7 +247,7 @@ function renderGallery() {
   const selectedSignNumber = signFilter?.value || "";
   let images = state.images.filter((image) => {
     if (state.activeCategory && image.category !== state.activeCategory) return false;
-    if (state.favoritesOnly && !state.favorites.has(image.id)) return false;
+    if (page === "saved" && !state.favorites.has(image.id)) return false;
     if (selectedSignNumber && !image.signNumbers.includes(selectedSignNumber)) return false;
     if (!term) return true;
     const category = state.categories.find((entry) => entry.id === image.category);
@@ -266,18 +275,42 @@ function renderGallery() {
   }
 
   state.visibleImages = images;
-  const totalImages = state.images.filter((image) =>
-    !state.activeCategory || image.category === state.activeCategory
-  ).length;
+  const totalImages = page === "saved"
+    ? state.images.filter((image) => state.favorites.has(image.id)).length
+    : state.images.filter((image) =>
+      !state.activeCategory || image.category === state.activeCategory
+    ).length;
   const countElement = document.querySelector("[data-image-count]");
   if (countElement) countElement.textContent = `${totalImages} ${totalImages === 1 ? "image" : "images"}`;
   imageGrid.replaceChildren();
   renderImageCards(images, images).forEach((card) => imageGrid.append(card));
   if (emptyState) emptyState.hidden = images.length > 0;
+  if (emptyState && page === "saved" && images.length === 0) {
+    emptyState.textContent = totalImages
+      ? "No saved images match your search. Try another term."
+      : "You haven't saved any images yet. Select the star on an image to save it here.";
+  }
   updateFilterNotice();
 }
 
-function pairedImagesFor(image) {
+function groupedImagesFor(image) {
+  const quadrant = image.title.match(/^(.*)-(top|bottom)-(L|R)$/i);
+  if (quadrant) {
+    const [, baseTitle] = quadrant;
+    const parts = state.images.filter((candidate) => {
+      const match = candidate.title.match(/^(.*)-(top|bottom)-(L|R)$/i);
+      return match && match[1].toLocaleLowerCase() === baseTitle.toLocaleLowerCase();
+    });
+    if (parts.length > 1) {
+      const order = new Map([["top-l", 0], ["top-r", 1], ["bottom-l", 2], ["bottom-r", 3]]);
+      return parts.sort((left, right) => {
+        const leftMatch = left.title.match(/-(top|bottom)-(L|R)$/i);
+        const rightMatch = right.title.match(/-(top|bottom)-(L|R)$/i);
+        return order.get(`${leftMatch[1].toLocaleLowerCase()}-${leftMatch[2].toLocaleLowerCase()}`) -
+          order.get(`${rightMatch[1].toLocaleLowerCase()}-${rightMatch[2].toLocaleLowerCase()}`);
+      });
+    }
+  }
   const match = image.title.match(/^(.*)-(L|R)$/i);
   if (!match) return null;
   const pairedTitle = `${match[1]}-${match[2].toLocaleLowerCase() === "l" ? "R" : "L"}`;
@@ -288,25 +321,40 @@ function pairedImagesFor(image) {
   return [image, pairedImage].sort((left, right) => left.title.slice(-1).localeCompare(right.title.slice(-1)));
 }
 
-function alternateImageSource(image) {
+function groupedImageTitle(image, groupedImages) {
+  if (!groupedImages) return image.title;
+  return image.title.replace(/-(?:(?:top|bottom)-)?(?:L|R)$/i, "");
+}
+
+function groupPartLabel(image) {
+  const quadrant = image.title.match(/-(top|bottom)-(L|R)$/i);
+  return quadrant ? `${quadrant[1].toLocaleUpperCase()} ${quadrant[2].toLocaleUpperCase()}` :
+    image.title.slice(-1).toLocaleUpperCase();
+}
+
+function imageSourceCandidates(image) {
   const alternateTitle = image.title.toLocaleLowerCase().startsWith("scp-")
     ? image.title.slice(4)
     : `SCP-${image.title}`;
-  if (!alternateTitle || alternateTitle === image.title) return null;
-  return `${IMAGE_DIRECTORY}${encodeURIComponent(alternateTitle)}.webp`;
+  const titles = [image.title];
+  if (alternateTitle && alternateTitle !== image.title) titles.push(alternateTitle);
+  return titles.flatMap((title) =>
+    IMAGE_EXTENSIONS.map((extension) => `${IMAGE_DIRECTORY}${encodeURIComponent(title)}${extension}`)
+  );
 }
 
 function setImageSource(element, image) {
+  const sources = imageSourceCandidates(image);
+  let sourceIndex = 0;
   element.onerror = () => {
-    const fallback = alternateImageSource(image);
-    if (fallback && element.dataset.fallbackAttempted !== "true") {
-      element.dataset.fallbackAttempted = "true";
-      element.src = fallback;
+    sourceIndex += 1;
+    if (sourceIndex < sources.length) {
+      element.src = sources[sourceIndex];
       return;
     }
     console.error(`Unable to load image file for "${image.title}".`);
   };
-  element.src = image.src;
+  element.src = sources[0];
 }
 
 function renderImageCards(images, lightboxImages = images, isNewForImage = () => false) {
@@ -314,49 +362,52 @@ function renderImageCards(images, lightboxImages = images, isNewForImage = () =>
   const cards = [];
   images.forEach((image, index) => {
     if (rendered.has(image.id)) return;
-    const pairedImages = pairedImagesFor(image);
-    if (pairedImages) pairedImages.forEach((pairedImage) => rendered.add(pairedImage.id));
-    const displayImage = pairedImages?.find((part) => lightboxImages.includes(part)) || pairedImages?.[0] || image;
+    const groupedImages = groupedImagesFor(image);
+    if (groupedImages) groupedImages.forEach((part) => rendered.add(part.id));
+    const displayImage = groupedImages?.find((part) => lightboxImages.includes(part)) || groupedImages?.[0] || image;
     const displayIndex = lightboxImages.indexOf(displayImage);
     cards.push(createImageCard(
       displayImage,
       displayIndex >= 0 ? displayIndex : index,
       lightboxImages,
       isNewForImage(image),
-      pairedImages
+      groupedImages
     ));
   });
   return cards;
 }
 
-function createImageCard(image, index, lightboxImages = state.visibleImages, isNew = false, pairedImages = null) {
+function createImageCard(image, index, lightboxImages = state.visibleImages, isNew = false, groupedImages = null) {
   const card = makeElement("article", "image-card");
   if (image.signCategory) card.dataset.signCategory = image.signCategory;
   const openButton = document.createElement("button");
   openButton.type = "button";
   openButton.className = "image-open";
-  const titleMatch = image.title.match(/^(.*)-(L|R)$/i);
-  const displayTitle = pairedImages ? titleMatch?.[1] || image.title : image.title;
-  openButton.setAttribute("aria-label", `View ${pairedImages ? `${displayTitle} L/R pair` : image.title}`);
+  const displayTitle = groupedImageTitle(image, groupedImages);
+  const groupDescription = groupedImages?.length === 4 ? "four-part image" : "L/R pair";
+  openButton.setAttribute("aria-label", `View ${groupedImages ? `${displayTitle} ${groupDescription}` : image.title}`);
   openButton.addEventListener("click", () => openLightbox(index, lightboxImages));
 
   const imageWrap = makeElement("span", "image-frame");
-  if (pairedImages) imageWrap.classList.add("image-frame--paired");
+  if (groupedImages) {
+    imageWrap.classList.add("image-frame--paired");
+    if (groupedImages.length === 4) imageWrap.classList.add("image-frame--quartered");
+  }
   if (isNew) {
     imageWrap.append(makeElement("span", "new-image-badge", "NEW"));
   }
-  const imagesToDisplay = pairedImages || [image];
+  const imagesToDisplay = groupedImages || [image];
   imagesToDisplay.forEach((part) => {
     const img = document.createElement("img");
-    img.alt = pairedImages ? `${displayTitle} ${part.title.slice(-1)}` : part.alt;
+    img.alt = groupedImages ? `${displayTitle} ${groupPartLabel(part)}` : part.alt;
     img.loading = "lazy";
     img.decoding = "async";
     img.width = part.width;
     img.height = part.height;
     setImageSource(img, part);
-    if (pairedImages) {
+    if (groupedImages) {
       const panel = makeElement("span", "image-pair-panel");
-      panel.append(img, makeElement("span", "image-pair-label", part.title.slice(-1).toLocaleUpperCase()));
+      panel.append(img, makeElement("span", "image-pair-label", groupPartLabel(part)));
       imageWrap.append(panel);
     } else {
       imageWrap.append(img);
@@ -369,8 +420,8 @@ function createImageCard(image, index, lightboxImages = state.visibleImages, isN
   const details = makeElement("div", "image-details");
   const title = makeElement("h3", "image-title", displayTitle);
   const category = state.categories.find((entry) => entry.id === image.category);
-  const detailsText = pairedImages
-    ? `${category?.name || "Collection"} · L/R pair · IDs ${pairedImages.map((part) => part.reference).join(" / ")}`
+  const detailsText = groupedImages
+    ? `${category?.name || "Collection"} · ${groupDescription} · IDs ${groupedImages.map((part) => part.reference).join(" / ")}`
     : image.requestedBy
     ? `${category?.name || "Collection"} · ID ${image.reference} · requested by ${image.requestedBy}`
     : `${category?.name || "Collection"} · ID ${image.reference}`;
@@ -425,15 +476,11 @@ function updateFavoriteCounts() {
   document.querySelectorAll("[data-favorites-count]").forEach((count) => {
     count.textContent = String(state.favorites.size);
   });
-  document.querySelectorAll("[data-favorites-toggle]").forEach((button) => {
-    button.setAttribute("aria-pressed", String(state.favoritesOnly));
-  });
 }
 
 function updateFilterNotice() {
   if (!filterNotice || !filterLabel) return;
   const labels = [];
-  if (state.favoritesOnly) labels.push("Saved images");
   if (signFilter?.value) labels.push(`Sign #: ${signFilter.value}`);
   if (searchInput?.value.trim()) labels.push(`Search: “${searchInput.value.trim()}”`);
   filterNotice.hidden = labels.length === 0;
@@ -475,18 +522,23 @@ function updateLightbox() {
   if (!image) return;
   const lightboxImage = lightbox.querySelector("[data-lightbox-image]");
   const pairContainer = lightbox.querySelector("[data-lightbox-pair]");
-  const pairedImages = pairedImagesFor(image);
-  if (pairedImages && pairContainer) {
+  const groupedImages = groupedImagesFor(image);
+  if (groupedImages && pairContainer) {
     lightboxImage.hidden = true;
     pairContainer.hidden = false;
-    const titleMatch = image.title.match(/^(.*)-(L|R)$/i);
-    const leftImage = lightbox.querySelector("[data-lightbox-left]");
-    leftImage.alt = `${titleMatch?.[1] || image.title} L`;
-    setImageSource(leftImage, pairedImages[0]);
-    const rightImage = lightbox.querySelector("[data-lightbox-right]");
-    rightImage.alt = `${titleMatch?.[1] || image.title} R`;
-    setImageSource(rightImage, pairedImages[1]);
-    lightbox.querySelector("[data-lightbox-title]").textContent = `${titleMatch?.[1] || image.title} (L/R)`;
+    pairContainer.replaceChildren();
+    pairContainer.dataset.partCount = String(groupedImages.length);
+    groupedImages.forEach((part) => {
+      const panel = makeElement("div", "lightbox-part");
+      const partImage = document.createElement("img");
+      partImage.alt = `${groupedImageTitle(image, groupedImages)} ${groupPartLabel(part)}`;
+      setImageSource(partImage, part);
+      panel.append(partImage, makeElement("span", "image-pair-label", groupPartLabel(part)));
+      pairContainer.append(panel);
+    });
+    const groupDescription = groupedImages.length === 4 ? "4-part" : "L/R";
+    lightbox.querySelector("[data-lightbox-title]").textContent =
+      `${groupedImageTitle(image, groupedImages)} (${groupDescription})`;
   } else {
     lightboxImage.hidden = false;
     lightboxImage.alt = image.alt;
@@ -497,30 +549,23 @@ function updateLightbox() {
   const details = lightbox.querySelector("[data-lightbox-details]");
   details.replaceChildren();
   let detailRows = image.details || [];
-  if (pairedImages) {
-    const [leftPart, rightPart] = pairedImages;
-    const leftDetails = new Map((leftPart.details || []).filter(([label]) => label !== "Name"));
-    const rightDetails = new Map((rightPart.details || []).filter(([label]) => label !== "Name"));
-    const labels = [...new Set([...leftDetails.keys(), ...rightDetails.keys()])];
+  if (groupedImages) {
+    const partDetails = groupedImages.map((part) => ({
+      part,
+      details: new Map((part.details || []).filter(([label]) => label !== "Name"))
+    }));
+    const labels = [...new Set(partDetails.flatMap(({ details: partMap }) => [...partMap.keys()]))];
     detailRows = labels.flatMap((label) => {
-      const leftValue = leftDetails.get(label);
-      const rightValue = rightDetails.get(label);
-      if (label === "ID") {
-        return [
-          [`L ${label}`, leftValue],
-          [`R ${label}`, rightValue]
-        ].filter(([, value]) => value);
+      const values = partDetails.map(({ part, details: partMap }) => ({
+        part,
+        value: partMap.get(label)
+      })).filter(({ value }) => value);
+      if (!values.length) return [];
+      const commonValue = values[0].value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+      if (values.every(({ value }) => value.trim().replace(/\s+/g, " ").toLocaleLowerCase() === commonValue)) {
+        return [[label, values[0].value]];
       }
-      if (label === "Requested by" && leftValue && rightValue &&
-        leftValue.trim().replace(/\s+/g, " ").toLocaleLowerCase() ===
-        rightValue.trim().replace(/\s+/g, " ").toLocaleLowerCase()) {
-        return [[label, leftValue]];
-      }
-      if (leftValue && leftValue === rightValue) return [[label, leftValue]];
-      return [
-        ...(leftValue ? [[`L ${label}`, leftValue]] : []),
-        ...(rightValue ? [[`R ${label}`, rightValue]] : [])
-      ];
+      return values.map(({ part, value }) => [`${groupPartLabel(part)} ${label}`, value]);
     });
   }
   detailRows.forEach(([label, value]) => {
@@ -534,8 +579,9 @@ function moveLightbox(direction) {
   if (!state.visibleImages.length) return;
   const currentImage = state.visibleImages[state.lightboxIndex];
   let nextIndex = (state.lightboxIndex + direction + state.visibleImages.length) % state.visibleImages.length;
-  const pairedImages = pairedImagesFor(currentImage);
-  if (pairedImages?.some((part) => part.id === state.visibleImages[nextIndex]?.id)) {
+  const groupedImages = groupedImagesFor(currentImage);
+  for (let attempts = 0; groupedImages?.some((part) => part.id === state.visibleImages[nextIndex]?.id) &&
+    attempts < state.visibleImages.length; attempts += 1) {
     nextIndex = (nextIndex + direction + state.visibleImages.length) % state.visibleImages.length;
   }
   state.lightboxIndex = nextIndex;
@@ -589,17 +635,8 @@ function initializeControls() {
   document.querySelector("[data-highlight-prev]")?.addEventListener("click", () => moveHighlight(-1));
   document.querySelector("[data-highlight-next]")?.addEventListener("click", () => moveHighlight(1));
 
-  document.querySelectorAll("[data-favorites-toggle]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.favoritesOnly = !state.favoritesOnly;
-      updateFavoriteCounts();
-      renderGallery();
-      document.querySelector("#gallery")?.scrollIntoView({ behavior: "smooth" });
-    });
-  });
   document.querySelectorAll("[data-clear-filter]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.favoritesOnly = false;
       if (searchInput) searchInput.value = "";
       if (signFilter) signFilter.value = "";
       updateFavoriteCounts();
@@ -654,8 +691,8 @@ function renderHomeGalleries() {
   const latestGrid = document.querySelector('[data-image-grid="latest"]');
   if (!state.highlightSlides.length) {
     const featuredSource = state.images.filter((image) => {
-      const pairedImages = pairedImagesFor(image);
-      return !pairedImages || image.title.toLocaleLowerCase().endsWith("-l");
+      const groupedImages = groupedImagesFor(image);
+      return !groupedImages || groupedImages[0].id === image.id;
     });
     for (let index = featuredSource.length - 1; index > 0; index -= 1) {
       const randomIndex = Math.floor(Math.random() * (index + 1));
@@ -663,12 +700,10 @@ function renderHomeGalleries() {
     }
     state.highlightSlides = featuredSource;
   }
-  const isVisible = (image) => !state.favoritesOnly || state.favorites.has(image.id);
-  const featured = state.highlightSlides.filter(isVisible);
+  const featured = state.highlightSlides;
   state.visibleHighlightSlides = featured;
   const latestImages = state.latestImages.length ? state.latestImages : state.images;
   const sortedByDate = latestImages
-    .filter(isVisible)
     .sort((left, right) => {
       const leftHasDate = Number.isFinite(left.fileDate);
       const rightHasDate = Number.isFinite(right.fileDate);
@@ -703,10 +738,10 @@ function renderHomeGalleries() {
       ];
       highlightGrid.replaceChildren(...positions.map(({ offset, slot }) => {
         const index = (state.highlightIndex + offset + featured.length) % featured.length;
-        const pairedImages = pairedImagesFor(featured[index]);
-        const displayImage = pairedImages?.find((part) => featured.includes(part)) || featured[index];
+        const groupedImages = groupedImagesFor(featured[index]);
+        const displayImage = groupedImages?.find((part) => featured.includes(part)) || featured[index];
         const displayIndex = featured.indexOf(displayImage);
-        const card = createImageCard(displayImage, displayIndex >= 0 ? displayIndex : index, featured, false, pairedImages);
+        const card = createImageCard(displayImage, displayIndex >= 0 ? displayIndex : index, featured, false, groupedImages);
         card.dataset.carouselSlot = slot;
         return card;
       }));
@@ -725,7 +760,7 @@ function renderHomeGalleries() {
   if (latestGrid) {
     latestGrid.replaceChildren(...renderImageCards(latest, latest, (image) => {
       if (!newestDateKey) return false;
-      return (pairedImagesFor(image) || [image]).some((part) =>
+      return (groupedImagesFor(image) || [image]).some((part) =>
         Number.isFinite(part.fileDate) &&
         Math.floor(part.fileDate / 3_600_000) === newestDateKey
       );
@@ -846,14 +881,18 @@ function parseWebpDate(buffer) {
 
 async function loadImageFileDates(images = state.images) {
   const results = await Promise.allSettled(images.map(async (image) => {
-    let response = await fetch(image.src);
-    if (!response.ok) {
-      const fallback = alternateImageSource(image);
-      if (!fallback) throw new Error(`Image request failed for "${image.title}": ${response.status}`);
-      response = await fetch(fallback);
-      if (!response.ok) throw new Error(`Image request failed for "${image.title}": ${response.status}`);
-      image.src = fallback;
+    let response = null;
+    let lastStatus = 0;
+    for (const source of imageSourceCandidates(image)) {
+      const candidateResponse = await fetch(source);
+      if (candidateResponse.ok) {
+        response = candidateResponse;
+        image.src = source;
+        break;
+      }
+      lastStatus = candidateResponse.status;
     }
+    if (!response) throw new Error(`Image request failed for "${image.title}": ${lastStatus}`);
     const embeddedDate = parseWebpDate(await response.arrayBuffer());
     const lastModified = Date.parse(response.headers.get("Last-Modified") || "");
     if (embeddedDate?.hasTime) return embeddedDate.timestamp;
@@ -887,22 +926,29 @@ async function initialize() {
   try {
     const isScpSignsPage = page === "category" &&
       new URLSearchParams(window.location.search).get("source") === "scp-signs";
+    const includeScpSigns = page === "home" || page === "saved";
     const [response, sizeResponse, latestResponse] = await Promise.all([
       fetch(isScpSignsPage ? SCP_SIGNS_CSV_URL : SHEET_CSV_URL),
       fetch(SIZE_REFERENCE_CSV_URL),
-      page === "home" ? fetch(SCP_SIGNS_CSV_URL) : Promise.resolve(null)
+      includeScpSigns ? fetch(SCP_SIGNS_CSV_URL) : Promise.resolve(null)
     ]);
     if (!response.ok) throw new Error(`Spreadsheet request failed: ${response.status}`);
     if (!sizeResponse.ok) throw new Error(`Size reference request failed: ${sizeResponse.status}`);
     if (latestResponse && !latestResponse.ok) throw new Error(`SCP signs spreadsheet request failed: ${latestResponse.status}`);
     const sizeReference = parseSizeReference(await sizeResponse.text());
     const data = sheetGallery(await response.text(), sizeReference, isScpSignsPage);
-    state.categories = data.categories;
-    state.images = data.images;
-    populateSignFilter(data.images);
-    state.latestImages = page === "home"
-      ? [...data.images, ...sheetGallery(await latestResponse.text(), sizeReference, true).images]
+    const scpData = latestResponse
+      ? namespaceGallery(sheetGallery(await latestResponse.text(), sizeReference, true), "scp")
+      : null;
+    state.categories = [...data.categories, ...(scpData?.categories || [])];
+    state.images = page === "saved"
+      ? [...data.images, ...(scpData?.images || [])]
       : data.images;
+    populateSignFilter(state.images);
+    state.latestImages = page === "home"
+      ? [...data.images, ...(scpData?.images || [])]
+      : state.images;
+    updateFavoriteCounts();
     const heroImage = document.querySelector("[data-hero-image]");
     if (heroImage && state.images[0]) {
       heroImage.alt = state.images[0].alt;
@@ -912,6 +958,11 @@ async function initialize() {
     }
     renderCategories();
     if (page === "category") initializeCategoryPage();
+    if (page === "saved") {
+      document.title = "Saved images — EMA001371's";
+      document.querySelector("[data-saved-nav]")?.classList.add("is-active");
+      document.querySelector("[data-saved-nav]")?.setAttribute("aria-current", "page");
+    }
     if (page === "home") {
       renderHomeGalleries();
       void loadImageFileDates(state.latestImages);
