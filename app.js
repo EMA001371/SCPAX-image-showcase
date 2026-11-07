@@ -110,10 +110,11 @@ function sheetGallery(csv, sizeReference = new Map(), isScpSigns = false) {
     id: normalizedHeaders.indexOf("id"),
     category1: normalizedHeaders.indexOf("category1"),
     category2: normalizedHeaders.indexOf("category2"),
-    requestedBy: normalizedHeaders.indexOf("requestedby")
+    requestedBy: normalizedHeaders.indexOf("requestedby"),
+    isNew: normalizedHeaders.indexOf("new")
   };
   if (Object.values(columns).some((column) => column < 0)) {
-    throw new Error("The spreadsheet needs name, sign#, id, category1, category2, and [requested] by columns.");
+    throw new Error("The spreadsheet needs name, sign#, id, category1, category2, [requested] by, and new columns.");
   }
   const categories = [];
   const categoryIds = new Map();
@@ -134,6 +135,7 @@ function sheetGallery(csv, sizeReference = new Map(), isScpSigns = false) {
     const categoryName = row[columns.category1] || "Uncategorized";
     const category2 = row[columns.category2] || "";
     const requestedBy = row[columns.requestedBy] || "";
+    const isNew = row[columns.isNew]?.toLocaleLowerCase() === "true";
     const signNumbers = (row[columns.sign] || "").split(",").map((sign) => sign.trim()).filter(Boolean);
     const sizeSignNumber = signNumbers[0];
     const hasCategory2 = category2 && category2.toLocaleLowerCase() !== "none";
@@ -150,6 +152,7 @@ function sheetGallery(csv, sizeReference = new Map(), isScpSigns = false) {
       width: 1200,
       height: 900,
       signNumbers,
+      isNew,
       tags: [id, categoryName, hasCategory2 ? category2 : "", requestedBy].filter(Boolean),
       reference: id,
       signNumber: sizeSignNumber && Number.isFinite(Number(sizeSignNumber))
@@ -357,7 +360,7 @@ function setImageSource(element, image) {
   element.src = sources[0];
 }
 
-function renderImageCards(images, lightboxImages = images, isNewForImage = () => false) {
+function renderImageCards(images, lightboxImages = images, isNewForImage = (image) => image.isNew) {
   const rendered = new Set();
   const cards = [];
   images.forEach((image, index) => {
@@ -370,7 +373,7 @@ function renderImageCards(images, lightboxImages = images, isNewForImage = () =>
       displayImage,
       displayIndex >= 0 ? displayIndex : index,
       lightboxImages,
-      isNewForImage(image),
+      (groupedImages || [image]).some(isNewForImage),
       groupedImages
     ));
   });
@@ -703,29 +706,7 @@ function renderHomeGalleries() {
   const featured = state.highlightSlides;
   state.visibleHighlightSlides = featured;
   const latestImages = state.latestImages.length ? state.latestImages : state.images;
-  const sortedByDate = latestImages
-    .sort((left, right) => {
-      const leftHasDate = Number.isFinite(left.fileDate);
-      const rightHasDate = Number.isFinite(right.fileDate);
-      if (leftHasDate && rightHasDate) return right.fileDate - left.fileDate;
-      if (leftHasDate) return -1;
-      if (rightHasDate) return 1;
-      return latestImages.indexOf(right) - latestImages.indexOf(left);
-    });
-  const newestDate = sortedByDate.find((image) => Number.isFinite(image.fileDate))?.fileDate;
-  const newestDateKey = Number.isFinite(newestDate)
-    ? Math.floor(newestDate / 3_600_000)
-    : null;
-  const newestDateImages = newestDateKey
-    ? sortedByDate.filter((image) =>
-      Number.isFinite(image.fileDate) &&
-      Math.floor(image.fileDate / 3_600_000) === newestDateKey
-    )
-    : [];
-  const olderImages = sortedByDate.filter((image) => !newestDateImages.includes(image));
-  const latest = newestDateKey
-    ? [...newestDateImages, ...olderImages.slice(0, Math.max(0, 6 - newestDateImages.length))]
-    : sortedByDate.slice(0, 6);
+  const latest = latestImages.filter((image) => image.isNew);
 
   if (highlightGrid) {
     highlightGrid.dataset.carouselDirection = String(state.highlightDirection);
@@ -741,7 +722,8 @@ function renderHomeGalleries() {
         const groupedImages = groupedImagesFor(featured[index]);
         const displayImage = groupedImages?.find((part) => featured.includes(part)) || featured[index];
         const displayIndex = featured.indexOf(displayImage);
-        const card = createImageCard(displayImage, displayIndex >= 0 ? displayIndex : index, featured, false, groupedImages);
+        const isNew = (groupedImages || [displayImage]).some((part) => part.isNew);
+        const card = createImageCard(displayImage, displayIndex >= 0 ? displayIndex : index, featured, isNew, groupedImages);
         card.dataset.carouselSlot = slot;
         return card;
       }));
@@ -758,13 +740,9 @@ function renderHomeGalleries() {
     }
   }
   if (latestGrid) {
-    latestGrid.replaceChildren(...renderImageCards(latest, latest, (image) => {
-      if (!newestDateKey) return false;
-      return (groupedImagesFor(image) || [image]).some((part) =>
-        Number.isFinite(part.fileDate) &&
-        Math.floor(part.fileDate / 3_600_000) === newestDateKey
-      );
-    }));
+    latestGrid.replaceChildren(...(latest.length
+      ? renderImageCards(latest, latest)
+      : [makeElement("p", "empty-state", "No images are marked NEW in the spreadsheet.")]));
   }
 
   const signCount = document.querySelector("[data-sign-total]");
@@ -778,139 +756,6 @@ function renderHomeGalleries() {
       moveHighlight(1);
     }, 5000);
   }
-}
-
-function parseEmbeddedDate(value) {
-  const normalized = value.trim().replace(
-    /^(\d{4}):(\d{2}):(\d{2})(?:\s+(\d{2}:\d{2}:\d{2}))?/,
-    (_, year, month, day, time) => `${year}-${month}-${day}${time ? `T${time}` : ""}`
-  );
-  const timestamp = Date.parse(normalized);
-  return Number.isNaN(timestamp)
-    ? null
-    : { timestamp, hasTime: /T\d{2}:\d{2}/i.test(normalized) };
-}
-
-function parseWebpDate(buffer) {
-  const view = new DataView(buffer);
-  const readAscii = (offset, length) =>
-    new TextDecoder().decode(new Uint8Array(buffer, offset, length));
-  if (buffer.byteLength < 12 || readAscii(0, 4) !== "RIFF" || readAscii(8, 4) !== "WEBP") return null;
-
-  const readExifDate = (chunkOffset, chunkLength) => {
-    let start = chunkOffset;
-    if (chunkLength >= 6 && readAscii(start, 6) === "Exif\u0000\u0000") start += 6;
-    if (start + 8 > chunkOffset + chunkLength) return null;
-    const byteOrder = readAscii(start, 2);
-    if (byteOrder !== "II" && byteOrder !== "MM") return null;
-    const littleEndian = byteOrder === "II";
-    const tiff = new DataView(buffer, start, chunkOffset + chunkLength - start);
-    if (tiff.getUint16(2, littleEndian) !== 42) return null;
-
-    const readIfd = (offset) => {
-      if (offset + 2 > tiff.byteLength) return null;
-      const count = tiff.getUint16(offset, littleEndian);
-      if (offset + 2 + count * 12 + 4 > tiff.byteLength) return null;
-      const entries = new Map();
-      for (let index = 0; index < count; index += 1) {
-        const entry = offset + 2 + index * 12;
-        const tag = tiff.getUint16(entry, littleEndian);
-        const type = tiff.getUint16(entry + 2, littleEndian);
-        const valueCount = tiff.getUint32(entry + 4, littleEndian);
-        const valueOffset = valueCount <= 4 ? entry + 8 : tiff.getUint32(entry + 8, littleEndian);
-        if (type === 2 && valueOffset + valueCount <= tiff.byteLength) {
-          entries.set(tag, readAscii(start + valueOffset, valueCount).replace(/\0+$/, ""));
-        } else if (type === 4 && valueCount === 1) {
-          entries.set(tag, tiff.getUint32(entry + 8, littleEndian));
-        }
-      }
-      return entries;
-    };
-
-    const ifd0Offset = tiff.getUint32(4, littleEndian);
-    const ifd0 = readIfd(ifd0Offset);
-    if (!ifd0) return null;
-    const exifIfdOffset = ifd0.get(0x8769);
-    const exifIfd = typeof exifIfdOffset === "number" ? readIfd(exifIfdOffset) : null;
-    for (const tag of [0x9003, 0x9004]) {
-      const date = exifIfd?.get(tag);
-      if (typeof date === "string") {
-        const parsedDate = parseEmbeddedDate(date);
-        if (parsedDate) return { rank: tag === 0x9003 ? 0 : 1, ...parsedDate };
-      }
-    }
-    const dateTime = ifd0.get(0x0132);
-    if (typeof dateTime === "string") {
-      const parsedDate = parseEmbeddedDate(dateTime);
-      if (parsedDate) return { rank: 4, ...parsedDate };
-    }
-    return null;
-  };
-
-  let bestDate = null;
-  const riffEnd = Math.min(buffer.byteLength, view.getUint32(4, true) + 8);
-  for (let offset = 12; offset + 8 <= riffEnd;) {
-    const chunkName = readAscii(offset, 4);
-    const chunkLength = view.getUint32(offset + 4, true);
-    const chunkOffset = offset + 8;
-    if (chunkOffset + chunkLength > riffEnd) break;
-    if (chunkName === "EXIF") {
-      const date = readExifDate(chunkOffset, chunkLength);
-      if (date && (!bestDate || date.rank < bestDate.rank)) bestDate = date;
-    } else if (chunkName === "XMP ") {
-      const xmp = new TextDecoder().decode(new Uint8Array(buffer, chunkOffset, chunkLength));
-      const dateTags = [
-        ["DateTimeOriginal", 0],
-        ["CreateDate", 1],
-        ["DateCreated", 2],
-        ["DateTimeDigitized", 3],
-        ["DateTime", 4],
-        ["Created", 5],
-        ["ModifyDate", 6]
-      ];
-      for (const [tag, rank] of dateTags) {
-        const match = xmp.match(new RegExp(`<[^>]*:?${tag}\\b[^>]*>([^<]+)<`, "i"));
-        const parsedDate = match ? parseEmbeddedDate(match[1]) : null;
-        if (parsedDate && (!bestDate || rank < bestDate.rank)) bestDate = { rank, ...parsedDate };
-      }
-    }
-    offset = chunkOffset + chunkLength + (chunkLength % 2);
-  }
-  return bestDate ?? null;
-}
-
-async function loadImageFileDates(images = state.images) {
-  const results = await Promise.allSettled(images.map(async (image) => {
-    let response = null;
-    let lastStatus = 0;
-    for (const source of imageSourceCandidates(image)) {
-      const candidateResponse = await fetch(source);
-      if (candidateResponse.ok) {
-        response = candidateResponse;
-        image.src = source;
-        break;
-      }
-      lastStatus = candidateResponse.status;
-    }
-    if (!response) throw new Error(`Image request failed for "${image.title}": ${lastStatus}`);
-    const embeddedDate = parseWebpDate(await response.arrayBuffer());
-    const lastModified = Date.parse(response.headers.get("Last-Modified") || "");
-    if (embeddedDate?.hasTime) return embeddedDate.timestamp;
-    if (Number.isFinite(lastModified)) return lastModified;
-    return embeddedDate?.timestamp ?? null;
-  }));
-  let failedCount = 0;
-  results.forEach((result, index) => {
-    if (result.status === "fulfilled") {
-      images[index].fileDate = result.value;
-    } else {
-      failedCount += 1;
-    }
-  });
-  if (failedCount) {
-    console.warn(`Could not read embedded dates from ${failedCount} image file${failedCount === 1 ? "" : "s"}.`);
-  }
-  renderHomeGalleries();
 }
 
 function moveHighlight(direction) {
@@ -965,7 +810,6 @@ async function initialize() {
     }
     if (page === "home") {
       renderHomeGalleries();
-      void loadImageFileDates(state.latestImages);
     }
     else renderGallery();
     openImageFromHash();
