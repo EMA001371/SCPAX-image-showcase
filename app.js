@@ -5,6 +5,7 @@ const STORAGE_KEYS = {
 const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1wnisJN1C7DpdBEgzpXHIyBismjKNsm4ZU7_VAErdeIk/export?format=csv&gid=0";
 const SCP_SIGNS_CSV_URL = "https://docs.google.com/spreadsheets/d/1wnisJN1C7DpdBEgzpXHIyBismjKNsm4ZU7_VAErdeIk/gviz/tq?tqx=out:csv&sheet=SCP-signs";
 const SIZE_REFERENCE_CSV_URL = "https://docs.google.com/spreadsheets/d/1wnisJN1C7DpdBEgzpXHIyBismjKNsm4ZU7_VAErdeIk/gviz/tq?tqx=out:csv&sheet=size-reference";
+const CONFIG_CSV_URL = "https://docs.google.com/spreadsheets/d/1wnisJN1C7DpdBEgzpXHIyBismjKNsm4ZU7_VAErdeIk/gviz/tq?tqx=out:csv&sheet=config";
 const IMAGE_DIRECTORY = "./images/";
 const IMAGE_EXTENSIONS = [".webp", ".png", ".jpg", ".jpeg"];
 
@@ -98,6 +99,24 @@ function parseCsv(csv) {
   row.push(field.trim());
   if (row.some(Boolean)) rows.push(row);
   return rows;
+}
+
+async function loadSiteVersion() {
+  const versionDisplay = document.querySelector("[data-site-version]");
+  if (!versionDisplay) return;
+
+  try {
+    const response = await fetch(CONFIG_CSV_URL);
+    if (!response.ok) throw new Error(`Config spreadsheet request failed: ${response.status}`);
+    const rows = parseCsv(await response.text());
+    const versionRow = rows.find(([key]) => key?.toLocaleLowerCase() === "version");
+    const version = versionRow?.[1];
+    if (!version) throw new Error("The config sheet needs a version row with a value in the next column.");
+    versionDisplay.textContent = `v${version}`;
+  } catch (error) {
+    console.error("Unable to load the site version.", error);
+    versionDisplay.textContent = "Unavailable";
+  }
 }
 
 function sheetGallery(csv, sizeReference = new Map(), isScpSigns = false) {
@@ -768,6 +787,7 @@ function moveHighlight(direction) {
 
 async function initialize() {
   initializeControls();
+  loadSiteVersion();
   try {
     const isScpSignsPage = page === "category" &&
       new URLSearchParams(window.location.search).get("source") === "scp-signs";

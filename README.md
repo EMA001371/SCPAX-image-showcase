@@ -14,7 +14,7 @@ Then visit `http://localhost:8000`.
 
 ## Spreadsheet and image files
 
-The gallery reads the CSV export of the linked Google Sheet directly. The sheet must be viewable by anyone with the link. The `signs` sheet supplies image names and collection metadata. The separate **SCP signs** page reads the `SCP-signs` sheet and joins its `sign#` values to the `sign#`, `width`, and `height` entries in `size-reference`.
+The gallery reads the CSV export of the linked Google Sheet directly. The sheet must be viewable by anyone with the link. The `signs` sheet supplies image names and collection metadata. The separate **SCP signs** page reads the `SCP-signs` sheet and joins its `sign#` values to the `sign#`, `width`, and `height` entries in `size-reference`. The home page reads the site version from the `config` sheet; put `version` in the first column and its value in the next column (for example, `version` | `1.1.0`). The version is prefixed with `v` on the page.
 
 Add image files to `images/` and add a corresponding row to the appropriate sheet; files without a sheet row are not included in the gallery. The filename should match the row's `name` value, with or without the `SCP-` prefix. The gallery tries `.webp`, `.png`, `.jpg`, and `.jpeg` files, in that order (for example, `images/SCP-maintenance-L1.webp` or `images/SCP-maintenance-L1.png`). On the **SCP signs** page, `SCP-` is added to names that do not already have it. `category1` groups the collections; `category2`, `sign#`, `id`, and `[requested] by` are shown with the image in the viewer. Set the `new` column to `TRUE` to include an image in Latest additions and show its **NEW** badge; `FALSE` (or a blank value) leaves it out. Keep the sheet public so the static site can fetch its CSV.
 
